@@ -9,7 +9,7 @@ import {
 } from "./types.js";
 
 export function detectPlatform(url: URL): Platform {
-  const host = url.hostname.toLowerCase().replace(/^www\\./, "");
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
   if (host === "chatgpt.com" || host === "chat.openai.com") return "chatgpt";
   if (host === "claude.ai") return "claude";
   throw new ShareError("unsupported_host", `No parser for host "${host}".`);
@@ -24,7 +24,7 @@ export async function fetchShareJson(
   shareUrl: URL,
   fetcher: typeof fetch = fetch
 ): Promise<{ transcriptData: unknown | null; diagnostic: string }> {
-  const match = /^\\/share\\/([0-9a-f-]{16,})\\/?$/i.exec(shareUrl.pathname);
+  const match = /^\/share\/([0-9a-f-]{16,})\/?$/i.exec(shareUrl.pathname);
   if (!match) return { transcriptData: null, diagnostic: "share_path_invalid" };
   const endpoint = `https://chatgpt.com/backend-api/share/${match[1]}`;
   let response: Response;
@@ -69,14 +69,14 @@ export async function extractTranscript(
         `(cf-mitigated: challenge), and the page is client-side rendered, so ` +
         `even the HTML behind the challenge contains only meta tags — no ` +
         `conversation. This is a platform limitation, not a bug in this tool, ` +
-        `and no amount of retrying or header tweaking gets around it.\\n\\n` +
+        `and no amount of retrying or header tweaking gets around it.\n\n` +
         `Use the browser bookmarklet instead: it runs on the share page you ` +
         `already have open and copies the transcript as Markdown + JSON in ` +
         `this tool's schema. See bookmarklet/README.md.`
     );
   }
 
-  if (!/^\\/share\\/[0-9a-f-]{16,}\\/?$/i.test(url.pathname)) {
+  if (!/^\/share\/[0-9a-f-]{16,}\/?$/i.test(url.pathname)) {
     throw new ShareError(
       "not_a_share_link",
       "Please provide a public ChatGPT /share/<id> link, not a private /c/ URL."
