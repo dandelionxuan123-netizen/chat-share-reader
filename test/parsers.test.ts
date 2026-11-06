@@ -9,8 +9,8 @@
 
 import assert from "node:assert/strict";
 
-import { parseChatGPT } from "../src/parsers/chatgpt.js";
-import { extractTranscript } from "../src/extract.js";
+import { parseChatGPT, parseChatGPTApiData } from "../src/parsers/chatgpt.js";
+import { extractTranscript, fetchShareJson } from "../src/extract.js";
 import { toMarkdown } from "../src/markdown.js";
 import { assertAllowedUrl } from "../src/fetchPage.js";
 import { ShareError } from "../src/types.js";
@@ -141,6 +141,55 @@ function chatgptLegacyHtml(): string {
 /* -------------------------------------------------------------------------- */
 /* Tests                                                                       */
 /* -------------------------------------------------------------------------- */
+
+console.log("\\nChatGPT — public share JSON fallback");
+
+test("parses a share API JSON payload without relying on React Flight", () => {
+  const data = {
+    title: "API response",
+    linear_conversation: [
+      { message: { author: { role: "user" }, content: { content_type: "text", parts: ["Hello"] } } },
+      { message: { author: { role: "assistant" }, content: { content_type: "text", parts: ["Hi"] } } },
+    ],
+  };
+  const parsed = parseChatGPTApiData(data, "https://chatgpt.com/share/12345678-1234-1234-1234-123456789012");
+  assert.equal(parsed.title, "API response");
+  assert.equal(parsed.messageCount, 2);
+  assert.equal(parsed.messages[1].text, "Hi");
+});
+
+test("accepts a nested share API data envelope", () => {
+  const parsed = parseChatGPTApiData({
+    data: {
+      title: "Wrapped",
+      mapping: { n: { message: { author: { role: "user" }, content: { content_type: "text", parts: ["Wrapped"] } } } },
+    },
+  }, "https://chatgpt.com/share/12345678-1234-1234-1234-123456789012");
+  assert.equal(parsed.messageCount, 1);
+});
+
+test("rejects an API response with no conversation content", () => {
+  assert.throws(
+    () => parseChatGPTApiData({ error: "blocked" }, "https://chatgpt.com/share/12345678-1234-1234-1234-123456789012"),
+    (err: unknown) => err instanceof ShareError && err.code === "parse_failed"
+  );
+});
+
+await testAsync("the JSON probe uses only the validated share id and handles 403", async () => {
+  const calls: string[] = [];
+  const fakeFetch = (async (input: string | URL | Request) => {
+    calls.push(String(input));
+    return new Response("", { status: 403 });
+  }) as typeof fetch;
+  const result = await fetchShareJson(
+    new URL("https://chatgpt.com/share/12345678-1234-1234-1234-123456789012"),
+    fakeFetch
+  );
+  assert.equal(result.diagnostic, "share_json_http_403");
+  assert.deepEqual(calls, [
+    "https://chatgpt.com/backend-api/share/12345678-1234-1234-1234-123456789012"
+  ]);
+});
 
 console.log("\nChatGPT — modern Flight format");
 
