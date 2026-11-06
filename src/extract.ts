@@ -1,6 +1,6 @@
 import { getCachedPage, setCachedPage } from "./cache.js";
 import { assertAllowedUrl, fetchSharePage } from "./fetchPage.js";
-import { parseChatGPT } from "./parsers/chatgpt.js";
+import { parseChatGPT, parseChatGPTApiData } from "./parsers/chatgpt.js";
 import {
   ShareError,
   type ChatTranscript,
@@ -9,15 +9,50 @@ import {
 } from "./types.js";
 
 export function detectPlatform(url: URL): Platform {
-  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  const host = url.hostname.toLowerCase().replace(/^www\\./, "");
   if (host === "chatgpt.com" || host === "chat.openai.com") return "chatgpt";
   if (host === "claude.ai") return "claude";
   throw new ShareError("unsupported_host", `No parser for host "${host}".`);
 }
 
 /**
+ * ChatGPT public shares can expose ordinary JSON at /backend-api/share/{id}.
+ * Prefer it to extracting version-dependent React Flight data from the HTML.
+ * Only a validated share id is used; never fetch arbitrary caller-supplied URLs.
+ */
+export async function fetchShareJson(
+  shareUrl: URL,
+  fetcher: typeof fetch = fetch
+): Promise<{ transcriptData: unknown | null; diagnostic: string }> {
+  const match = /^\\/share\\/([0-9a-f-]{16,})\\/?$/i.exec(shareUrl.pathname);
+  if (!match) return { transcriptData: null, diagnostic: "share_path_invalid" };
+  const endpoint = `https://chatgpt.com/backend-api/share/${match[1]}`;
+  let response: Response;
+  try {
+    response = await fetcher(endpoint, {
+      headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    return { transcriptData: null, diagnostic: "share_json_network_failure" };
+  }
+  if (!response.ok) return { transcriptData: null, diagnostic: `share_json_http_${response.status}` };
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("json")) {
+    return { transcriptData: null, diagnostic: "share_json_unexpected_content_type" };
+  }
+  try {
+    return { transcriptData: await response.json(), diagnostic: "share_json_ok" };
+  } catch {
+    return { transcriptData: null, diagnostic: "share_json_invalid_json" };
+  }
+}
+
+/**
  * Fetch and parse a public shared conversation into the normalized schema.
- * Throws ShareError with an explainable message for all expected failures.
+ * Prefer the public JSON endpoint, fall back to legacy HTML decoding.
+ * An HTML parse failure is not proof that the link was revoked.
  */
 export async function extractTranscript(
   rawUrl: string,
@@ -26,9 +61,6 @@ export async function extractTranscript(
   const url = assertAllowedUrl(rawUrl.trim());
   const platform = detectPlatform(url);
 
-  // Claude share pages cannot be read server-side at all — see the note on
-  // parsers/claude.ts. Fail here, before the fetch, so the error explains the
-  // real reason instead of surfacing as a generic 403 or an empty parse.
   if (platform === "claude") {
     throw new ShareError(
       "claude_not_supported",
@@ -37,33 +69,48 @@ export async function extractTranscript(
         `(cf-mitigated: challenge), and the page is client-side rendered, so ` +
         `even the HTML behind the challenge contains only meta tags — no ` +
         `conversation. This is a platform limitation, not a bug in this tool, ` +
-        `and no amount of retrying or header tweaking gets around it.\n\n` +
+        `and no amount of retrying or header tweaking gets around it.\\n\\n` +
         `Use the browser bookmarklet instead: it runs on the share page you ` +
         `already have open and copies the transcript as Markdown + JSON in ` +
         `this tool's schema. See bookmarklet/README.md.`
     );
   }
 
-  // Nudge users who paste a private conversation URL rather than a share link.
-  if (!/\/share\//.test(url.pathname)) {
+  if (!/^\\/share\\/[0-9a-f-]{16,}\\/?$/i.test(url.pathname)) {
     throw new ShareError(
       "not_a_share_link",
-      `That looks like a private conversation URL, not a public share link. ` +
-        `Open the chat, click Share, copy the generated link (it contains ` +
-        `"/share/"), and try that instead.`
+      "Please provide a public ChatGPT /share/<id> link, not a private /c/ URL."
     );
   }
 
-  // Cache the page, not the rendered transcript: the same conversation gets
-  // read at different offsets and formats, and those shouldn't each need their
-  // own fetch. See cache.ts for why this helps latency and ChatGPT's servers
-  // but not the Fast Origin Transfer bill.
-  const href = url.toString();
-  let html = await getCachedPage(href);
-  if (html === null) {
-    html = await fetchSharePage(url);
-    await setCachedPage(href, html);
+  const api = await fetchShareJson(url);
+  let jsonParseError = "";
+  if (api.transcriptData !== null) {
+    try {
+      return parseChatGPTApiData(api.transcriptData, url.toString(), options);
+    } catch (err) {
+      jsonParseError = err instanceof Error ? err.message : String(err);
+    }
   }
 
-  return parseChatGPT(html, href, options);
+  const href = url.toString();
+  try {
+    let html = await getCachedPage(href);
+    if (html === null) {
+      html = await fetchSharePage(url);
+      await setCachedPage(href, html);
+    }
+    return parseChatGPT(html, href, options);
+  } catch (htmlError) {
+    const htmlMessage = htmlError instanceof Error ? htmlError.message : String(htmlError);
+    throw new ShareError(
+      "share_read_failed",
+      `Public share could not be read. JSON endpoint: ${api.diagnostic}` +
+        (jsonParseError ? ` (${jsonParseError})` : "") +
+        `; HTML fallback: ${htmlMessage}. ` +
+        "This does not prove that the share link is invalid. " +
+        "Check whether the link opens in a signed-out browser, and whether " +
+        "the server received a bot challenge or a changed response format."
+    );
+  }
 }
