@@ -362,6 +362,44 @@ export function parseChatGPT(
     );
   }
 
+  return buildChatTranscript(data, url, opts, warnings, shareId);
+}
+
+/** The public ChatGPT share JSON response has the same message schema as the page. */
+export function parseChatGPTApiData(
+  payload: unknown,
+  url: string,
+  options: ExtractOptions = {}
+): ChatTranscript {
+  const root = isObj(payload) ? payload : null;
+  const nested = root && isObj(root.data) ? root.data : null;
+  const data = root && isConversationData(root)
+    ? root
+    : nested && isConversationData(nested)
+      ? nested
+      : null;
+  if (!data) {
+    throw new ShareError(
+      "parse_failed",
+      "The public ChatGPT share JSON response contains no conversation mapping or linear_conversation."
+    );
+  }
+  return buildChatTranscript(
+    data,
+    url,
+    { ...DEFAULT_OPTIONS, ...options },
+    ["Conversation read from the public share JSON endpoint."],
+    ""
+  );
+}
+
+function buildChatTranscript(
+  data: Record<string, Json>,
+  url: string,
+  opts: Required<ExtractOptions>,
+  warnings: string[],
+  shareId: string
+): ChatTranscript {
   const messages = buildMessages(data, opts, warnings);
   if (messages.length === 0) {
     warnings.push(
