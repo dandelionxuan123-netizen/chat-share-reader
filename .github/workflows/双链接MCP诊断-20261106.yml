@@ -1,0 +1,80 @@
+name: 双链接MCP诊断（隔离）
+on:
+  push:
+    branches:
+      - diagnose/two-share-links-20261106
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Test live MCP metadata and bounded message windows
+        shell: bash
+        env:
+          MCP_URL: https://chat-share-reader-seven.vercel.app/mcp
+          CHAT_URL_A: https://chatgpt.com/share/6aed9352-d0d0-83e8-aa31-0d9a1b85d8c8
+          CHAT_URL_B: https://chatgpt.com/share/6aedc19e-4238-83ee-95a8-655d93d4db4e
+        run: |
+          node <<'JS'
+          const target = process.env.MCP_URL;
+          const sources = [
+            { name: 'A', url: process.env.CHAT_URL_A },
+            { name: 'B', url: process.env.CHAT_URL_B },
+          ];
+          const call = async (name, url, extra = {}) => {
+            const started = Date.now();
+            try {
+              const response = await fetch(target, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Accept': 'application/json, text/event-stream',
+                  'MCP-Protocol-Version': '2025-06-18',
+                },
+                body: JSON.stringify({
+                  jsonrpc: '2.0', id: 1, method: 'tools/call',
+                  params: { name, arguments: { url, ...extra } },
+                }),
+                signal: AbortSignal.timeout(50000),
+              });
+              const raw = await response.text();
+              let rpc;
+              try { rpc = JSON.parse(raw); }
+              catch {
+                const dataLine = raw.split('\n').find(v => v.startsWith('data: '));
+                if (dataLine) { try { rpc = JSON.parse(dataLine.slice(6)); } catch {} }
+              }
+              const message = rpc?.result?.content?.filter(x=>x.type==='text').map(x=>x.text).join('\n') || '';
+              let payload;
+              try { payload = JSON.parse(message); } catch {}
+              const outcome = {
+                http: response.status,
+                elapsed_ms: Date.now()-started,
+                bytes: raw.length,
+                isError: Boolean(rpc?.result?.isError || rpc?.error),
+                total: payload?.messageCount ?? payload?.window?.total ?? null,
+                returned: Array.isArray(payload?.messages) ? payload.messages.length : null,
+                next: payload?.window?.nextOffset ?? null,
+                error: (rpc?.error?.message || (rpc?.result?.isError ? message : '') || (!rpc ? 'response_not_parseable' : '')).slice(0,380),
+              };
+              return outcome;
+            } catch(e) {
+              return { http: null, elapsed_ms:Date.now()-started, error: e?.message || String(e) };
+            }
+          };
+          for(const source of sources) {
+            const meta = await call('get_shared_chat_metadata',source.url);
+            console.log(JSON.stringify({source:source.name,phase:'metadata',...meta}));
+            const count = Number.isInteger(meta.total) ? meta.total : null;
+            const head = await call('read_shared_chat',source.url,{format:'json',offset:0,limit:2});
+            console.log(JSON.stringify({source:source.name,phase:'first_2',...head}));
+            if(count && count>4) {
+              const middle = await call('read_shared_chat',source.url,{format:'json',offset:Math.floor(count/2),limit:2});
+              console.log(JSON.stringify({source:source.name,phase:'middle_2',...middle}));
+              const tail = await call('read_shared_chat',source.url,{format:'json',offset:count-2,limit:2});
+              console.log(JSON.stringify({source:source.name,phase:'last_2',...tail}));
+            }
+          }
+          JS
